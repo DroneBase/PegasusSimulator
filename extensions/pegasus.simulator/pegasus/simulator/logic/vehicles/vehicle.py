@@ -426,8 +426,9 @@ class Vehicle:
         Args:
             event: Rendering event from RenderingManager.
         """
-        # Extract dt from the event payload if available, otherwise use a sensible default
-        dt = 1.0 / 60.0
+        # Extract dt from the event payload if available, otherwise use the configured render step (each app
+        # update advances the timeline by it; see PegasusInterface.initialize_world)
+        dt = RenderingManager.get_dt() or 1.0 / 60.0
         if hasattr(event, 'payload') and isinstance(event.payload, dict):
             dt = event.payload.get('dt', dt)
 
