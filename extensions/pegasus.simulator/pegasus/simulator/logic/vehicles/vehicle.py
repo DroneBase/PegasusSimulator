@@ -98,6 +98,10 @@ class Vehicle:
         # Body rigid prim — created lazily after simulation starts
         self._body_rigid_prim: RigidPrim | None = None
 
+        # Rigid prims by body part ("/body", "/rotor0", ...), each built on first use and kept until
+        # the simulation stops (see _rigid_prim)
+        self._rigid_prims: dict[str, RigidPrim] = {}
+
         # Add the current vehicle to the vehicle manager, so that it knows
         # that a vehicle was instantiated
         VehicleManager.get_vehicle_manager().add_vehicle(self._stage_prefix, self)
@@ -224,6 +228,7 @@ class Vehicle:
 
             # Create (or re-create) the rigid prim wrapper now that physics is ready
             self._body_rigid_prim = RigidPrim(paths=self._stage_prefix + "/body")
+            self._rigid_prims = {"/body": self._body_rigid_prim}
 
             # Initialize the sensors
             for sensor in self._sensors:
@@ -244,8 +249,9 @@ class Vehicle:
         if self._sim_running:
             self._sim_running = False
 
-            # Release the rigid prim wrapper so it can be re-created fresh on next play
+            # Release the rigid prim wrappers so they can be re-created fresh on next play
             self._body_rigid_prim = None
+            self._rigid_prims = {}
 
             # Stop the sensors
             for sensor in self._sensors:
@@ -261,6 +267,25 @@ class Vehicle:
 
             self.stop()
 
+    def _rigid_prim(self, body_part: str):
+        """
+        The RigidPrim of a body part, built on its first use and kept until the simulation stops. Building one
+        creates a physics tensor view, so building it on every call made about a thousand views a second on a
+        quadrotor (four rotors at 250 Hz).
+
+        Args:
+            body_part (str): Rigid body sub-path relative to the vehicle stage prefix, e.g. "/body" or "/rotor0".
+
+        Returns:
+            The RigidPrim, or None while the simulation is not running.
+        """
+        if self._body_rigid_prim is None or not self._body_rigid_prim.is_physics_tensor_entity_valid():
+            return None
+        rigid_prim = self._rigid_prims.get(body_part)
+        if rigid_prim is None:
+            rigid_prim = self._rigid_prims[body_part] = RigidPrim(paths=self._stage_prefix + body_part)
+        return rigid_prim
+
     def apply_force(self, force, pos=[0.0, 0.0, 0.0], body_part="/body"):
         """
         Method that will apply a force on the rigidbody, on the part specified in the 'body_part' at its relative position
@@ -271,11 +296,9 @@ class Vehicle:
             pos (list): Position offset in local body frame. Defaults to [0.0, 0.0, 0.0].
             body_part (str): Rigid body sub-path relative to the vehicle stage prefix. Defaults to "/body".
         """
-        if self._body_rigid_prim is None or not self._body_rigid_prim.is_physics_tensor_entity_valid():
+        rigid_prim = self._rigid_prim(body_part)
+        if rigid_prim is None:
             return
-
-        prim_path = self._stage_prefix + body_part
-        rigid_prim = RigidPrim(paths=prim_path) if body_part != "/body" else self._body_rigid_prim
 
         forces = np.array([[force[0], force[1], force[2]]], dtype=np.float32)
         torques = np.zeros((1, 3), dtype=np.float32)
@@ -290,11 +313,9 @@ class Vehicle:
             torque (list): A 3-dimensional vector of floats with the torque [Tx, Ty, Tz] on the body axis of the vehicle according to a FLU convention.
             body_part (str): Rigid body sub-path relative to the vehicle stage prefix. Defaults to "/body".
         """
-        if self._body_rigid_prim is None or not self._body_rigid_prim.is_physics_tensor_entity_valid():
+        rigid_prim = self._rigid_prim(body_part)
+        if rigid_prim is None:
             return
-
-        prim_path = self._stage_prefix + body_part
-        rigid_prim = RigidPrim(paths=prim_path) if body_part != "/body" else self._body_rigid_prim
 
         forces = np.zeros((1, 3), dtype=np.float32)
         torques = np.array([[torque[0], torque[1], torque[2]]], dtype=np.float32)
