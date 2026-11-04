@@ -18,7 +18,9 @@ from threading import Lock
 import carb
 import omni.kit.app
 import omni.usd
+from pxr import UsdGeom
 from isaacsim.core.simulation_manager import SimulationManager
+from isaacsim.core.rendering_manager import RenderingManager
 import isaacsim.core.experimental.utils.app as app_utils
 import isaacsim.core.experimental.utils.stage as stage_utils
 import isaacsim.storage.native as nucleus
@@ -168,9 +170,36 @@ class PegasusInterface:
         carb.log_warn("New global coordinates set to: " + str(self._latitude) + ", " + str(self._longitude) + ", " + str(self._altitude))
 
     def initialize_world(self):
-        """Apply simulation settings (physics dt) via SimulationManager."""
-        physics_dt = self._world_settings.get("physics_dt", 1.0 / 250.0)
-        SimulationManager.set_physics_dt(physics_dt)
+        """Apply the world settings (see set_world_settings) to the current stage, its physics scene and the run loop."""
+        self._apply_world_settings()
+
+    def _apply_world_settings(self):
+        """
+        Apply all four world settings, as Isaac Sim 5's World(physics_dt, rendering_dt, stage_units_in_meters,
+        device) did. Isaac Sim 6 has no World: applying only the physics dt left the render rate at the app's
+        default, the stage units unset and the physics scene on PhysX's schema defaults (GPU broadphase and
+        dynamics, no CCD) where World set CPU physics. The scene defaults below are World's for a CPU device.
+        """
+        settings = self._world_settings
+        stage = omni.usd.get_context().get_stage()
+
+        # The stage: Z up, in the configured units
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+        if settings.get("stage_units_in_meters"):
+            UsdGeom.SetStageMetersPerUnit(stage, settings["stage_units_in_meters"])
+
+        # The physics scene (created if missing): the step and the device
+        SimulationManager.setup_simulation(dt=settings.get("physics_dt", 1.0 / 250.0), device=settings.get("device"))
+        if "cuda" not in str(settings.get("device") or "cpu"):
+            for scene in SimulationManager.get_physics_scenes():
+                for setter, value in (("set_solver_type", "TGS"), ("set_enabled_ccd", True),
+                                      ("set_enabled_stabilization", False)):
+                    if hasattr(scene, setter):
+                        getattr(scene, setter)(value)
+
+        # The run loop: each app update advances the timeline by rendering_dt
+        if settings.get("rendering_dt"):
+            RenderingManager.set_dt(settings["rendering_dt"])
 
     def get_vehicle(self, stage_prefix: str):
         """Method that returns the vehicle object given its 'stage_prefix', i.e., the name the vehicle was spawned with in the simulator.
@@ -245,8 +274,7 @@ class PegasusInterface:
 
         if force_clear:
             await stage_utils.create_new_stage_async()
-            physics_dt = self._world_settings.get("physics_dt", 1.0 / 250.0)
-            SimulationManager.set_physics_dt(physics_dt)
+            self._apply_world_settings()
 
         # Load the USD asset that will be used for the environment
         try:
