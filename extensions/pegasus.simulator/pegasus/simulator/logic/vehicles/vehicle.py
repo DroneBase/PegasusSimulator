@@ -14,6 +14,7 @@ import carb
 from pxr import Usd, Gf, UsdGeom
 
 # High level Isaac sim APIs
+import omni.timeline
 import omni.usd
 from omni.usd import get_stage_next_free_path
 import isaacsim.core.experimental.utils.app as app_utils
@@ -139,6 +140,10 @@ class Vehicle:
         for graphical_sensor in self._graphical_sensors:
             graphical_sensor.initialize(self)
 
+        # Timeline time of the graphical sensors' last step (None: none yet this run); see
+        # update_graphical_sensors
+        self._graphical_sensors_time = None
+
         # Add callback to the rendering engine to update each graphical sensor
         self._cb_render = RenderingManager.register_callback(RenderingEvent.NEW_FRAME, callback=self.update_graphical_sensors)
 
@@ -229,6 +234,7 @@ class Vehicle:
             # Create (or re-create) the rigid prim wrapper now that physics is ready
             self._body_rigid_prim = RigidPrim(paths=self._stage_prefix + "/body")
             self._rigid_prims = {"/body": self._body_rigid_prim}
+            self._graphical_sensors_time = None
 
             # Initialize the sensors
             for sensor in self._sensors:
@@ -252,6 +258,7 @@ class Vehicle:
             # Release the rigid prim wrappers so they can be re-created fresh on next play
             self._body_rigid_prim = None
             self._rigid_prims = {}
+            self._graphical_sensors_time = None
 
             # Stop the sensors
             for sensor in self._sensors:
@@ -420,17 +427,29 @@ class Vehicle:
                     backend.update_sensor(sensor.sensor_type, sensor_data)
 
     def update_graphical_sensors(self, event):
-        """Callback that is called at every rendering steps and will call the graphical_sensor.update method to generate new
-        sensor data.
+        """Callback for the rendering engine's NEW_FRAME event: steps each graphical sensor once per step of the
+        timeline, by the simulation time since its last step.
+
+        NEW_FRAME fires once per render product (a camera's own product, a segmentation product, the viewport),
+        so one app update can deliver it several times: three times per update with a camera, its segmentation
+        product and the viewport. Stepping on every event ran each sensor's rate gate that many times too fast.
+        Isaac Sim 5's World ran render callbacks once per app update; stepping only when the timeline time has
+        moved keeps that. An update with no frame at all hands the next step the whole elapsed time.
 
         Args:
-            event: Rendering event from RenderingManager.
+            event: Rendering event from RenderingManager (unused).
         """
-        # Extract dt from the event payload if available, otherwise use the configured render step (each app
-        # update advances the timeline by it; see PegasusInterface.initialize_world)
-        dt = RenderingManager.get_dt() or 1.0 / 60.0
-        if hasattr(event, 'payload') and isinstance(event.payload, dict):
-            dt = event.payload.get('dt', dt)
+        now = omni.timeline.get_timeline_interface().get_current_time()
+        last = self._graphical_sensors_time
+        if last is not None and now == last:
+            return  # another render product's frame, for a step the sensors already took
+        self._graphical_sensors_time = now
+        if last is None or now < last:
+            # The run's first step, or the timeline went back: the configured render step, which each app
+            # update advances the timeline by (see PegasusInterface.initialize_world)
+            dt = RenderingManager.get_dt() or 1.0 / 60.0
+        else:
+            dt = now - last
 
         for sensor in self._graphical_sensors:
             sensor_data = sensor.update(self._state, dt)
